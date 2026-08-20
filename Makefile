@@ -16,7 +16,7 @@ bench:
 	$(PY) -m agent.cli --in data/questions.jsonl --out results.jsonl --bench
 
 build:
-	$(PY) -m agent.build_aliases --store data/store.json --out data/aliases.json
+	$(PY) -m agent.build_facts --store data/store.json --out data/facts.json
 
 clean:
 	find . -name "__pycache__" -type d -exec rm -rf {} +

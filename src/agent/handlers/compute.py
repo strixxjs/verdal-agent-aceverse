@@ -43,11 +43,15 @@ def _size_as_int(query: NormalizedQuery) -> int | None:
 
 
 def _shipping_signal(query: NormalizedQuery) -> str | None:
-    """Which shipping tier the question refers to, if any."""
+    """Which shipping tier the question refers to, if any.
+
+    Roots are truncated to STEM_PREFIX_LEN (5) to match normalize.py stemming:
+    'доставка' stems to 'доста', so the root must be 'доста', not 'достав'.
+    """
     tokens = query.tokens
     if any(t.startswith("експр") for t in tokens):
         return "express"
-    if any(t.startswith("достав") or t.startswith("станд") for t in tokens):
+    if any(t.startswith("доста") or t.startswith("станд") for t in tokens):
         return "standard"
     return None
 
