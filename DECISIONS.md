@@ -116,3 +116,23 @@ the `fallback_degraded` branch.
 `questions.jsonl` to `results.jsonl`. Nobody in that scenario needs HTTP;
 it adds dependencies and startup time. This is exactly the kind of feature
 that was not asked for.
+
+---
+
+## 7. Free-tier TPM ceiling as an architectural fact
+
+**Observed during build:** Groq free tier caps at 8000 tokens per minute,
+not just 30 requests per minute. The offline build hit 429 repeatedly and
+needed retry-with-backoff to finish.
+
+**Why it matters for the hot path:** the tail sends the whole store.json in
+the prompt. store.json is ~4000 tokens; at 8000 TPM a handful of tail calls
+per minute is the ceiling. On the evaluator's larger question file, if too
+many questions reach the tail, they serialize behind the rate limit and blow
+the latency budget.
+
+**Consequence:** this is not a tuning detail, it is the reason the deterministic
+path must catch the overwhelming majority of questions. The tail is a safety
+net for genuinely unclassifiable input, not a second answering strategy.
+Reinforces decision 3: the budget holds by construction, and the construction
+depends on keeping the tail small.
