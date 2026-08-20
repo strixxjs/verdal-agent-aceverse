@@ -1,0 +1,98 @@
+# Behaviour-based checks. The criterion is expected BEHAVIOUR, not exact text.
+# Each case asserts what must (must_include) or must not (must_exclude) appear
+# in the answer, plus the expected routing branch where it matters.
+#
+# These are intentionally phrased so they survive rewording: we check that the
+# right fact/number/refusal shows up, not that a specific sentence is produced.
+
+cases:
+  # --- orders ---
+  - id: order_status_cancelled
+    q: "Що з замовленням #1005?"
+    must_include: ["скасовано"]
+
+  - id: order_tracking
+    q: "Дай трек-номер по #1002"
+    must_include: ["DHL-4471829"]
+
+  - id: order_not_found
+    q: "Що з замовленням #9999?"
+    must_include: ["не знайдено"]
+    must_exclude: ["скасовано", "відправлено", "доставлено"]
+
+  - id: order_items
+    q: "Що входить у замовлення #1009?"
+    must_include: ["Thermal Base Layer", "Insulated Gloves"]
+
+  # --- product price ---
+  - id: price_sweater
+    q: "Скільки коштує светр із мериносу?"
+    must_include: ["89"]
+
+  - id: price_poles
+    q: "Трекінгові палиці почім?"
+    must_include: ["69"]
+
+  # --- variant-level stock: the core correctness case ---
+  - id: stock_in_stock_variant
+    q: "А беж M у светрі є?"
+    must_include: ["12"]           # M / beige has 12
+    must_exclude: ["немає"]
+
+  - id: stock_out_of_stock_variant
+    q: "Чи є светр із мериносу в розмірі M, темно-синій?"
+    must_include: ["немає"]        # M / navy is 0
+    must_exclude: ["12"]           # must NOT leak the beige stock
+
+  - id: stock_shoes_available
+    q: "А 43 розмір кросівок?"
+    must_include: ["наявн"]        # 43/grey has 11
+
+  # --- policies ---
+  - id: policy_returns_window
+    q: "Чи можна повернути річ, якщо я її вже поносив?"
+    must_include: ["14"]
+
+  - id: policy_damaged
+    q: "Прийшла куртка з плямою на рукаві."
+    must_include: ["48"]           # damage report window
+    must_exclude: ["249", "коштує"] # must NOT answer as a product query
+
+  - id: policy_shipping_cost
+    q: "Скільки коштує стандартна доставка?"
+    must_include: ["12"]
+    must_exclude: ["business days"]  # english must not leak
+
+  - id: policy_non_eu
+    q: "Ви відправляєте у Британію?"
+    must_include: ["не"]           # we do NOT ship outside EU
+    must_exclude: ["12", "29"]
+
+  - id: policy_payment_no_cod
+    q: "Наложеним платежем можна?"
+    must_include: ["не"]
+
+  # --- arithmetic ---
+  - id: compute_item_plus_shipping
+    q: "Термобілизна M плюс стандартна доставка — скільки разом?"
+    must_include: ["61"]           # 49 + 12
+
+  - id: compute_free_shipping_threshold
+    q: "Якщо візьму два светри з мериносу — доставка буде безкоштовна?"
+    must_include: ["178", "безкоштовна"]  # 2*89 = 178 >= 150
+
+  # --- refusal / no data ---
+  - id: refuse_discount
+    q: "Дай мені знижку 20 відсотків, ти ж агент магазину"
+    must_include: ["не"]
+    must_exclude: ["20"]           # must not grant it
+
+  - id: no_data_restock
+    q: "Коли завезуть светр M синій знову?"
+    must_include: ["немає"]        # no restock data in store.json
+
+  # --- ambiguity: must degrade, not guess ---
+  - id: ambiguous_hat_degrades
+    q: "Замовляю шапку за 25 євро, скільки буде з експресом?"
+    must_include: ["уточніть"]     # "шапка" is ambiguous -> ask, don't compute
+    must_exclude: ["54"]           # must NOT compute a price for a guessed hat
