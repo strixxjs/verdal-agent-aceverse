@@ -136,3 +136,26 @@ path must catch the overwhelming majority of questions. The tail is a safety
 net for genuinely unclassifiable input, not a second answering strategy.
 Reinforces decision 3: the budget holds by construction, and the construction
 depends on keeping the tail small.
+
+---
+
+## 8. Fuzzy confidence threshold: chosen from measured gap
+
+**Chosen:** CONFIDENCE_THRESHOLD = 60, plus a rule that a single-token alias
+cannot win on the fuzzy path (it must share >=2 stemmed tokens or match via
+exact).
+
+**How:** ran resolution over the 39 questions printing raw best_fuzzy for
+every question. Two clean clusters emerged — non-product questions (policies,
+orders) peaked at 57.1, real product questions bottomed at 62.5. 60 sits in
+that gap.
+
+**Why not 80 (the first guess):** 80 silently dropped every "светр із
+мериносу" phrasing (78.6) and the socks/shoes cases (62-63) into the LLM
+tail. The number was picked from intuition, not data; the data moved it 20
+points.
+
+**When it breaks:** the gap (57-62) is narrow. On the evaluator's larger file
+a noise question could exceed 57 or a real product dip below 62, and the two
+clusters could touch. The single-token gate and exact-match layer are what
+keep a narrow fuzzy band from being the only line of defence.
