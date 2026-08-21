@@ -103,3 +103,32 @@ To regenerate aliases after changing `store.json`: `make build`.
 - **No multi-turn memory, no voice layer** — out of scope for Part 1.
 
 ## Layout
+
+src/agent/
+  store.py       load store.json, build in-memory indexes
+  normalize.py   Ukrainian text normalization
+  resolve.py     text -> product / variant / order
+  router.py      intent classification
+  handlers/      order, product, policy, compute
+  fallback.py    LLM tail with wall-clock deadline
+  timing.py      percentiles
+  build_facts.py offline alias + policy-fact generation
+  cli.py         pipeline entry point
+eval/            behaviour-based scenario suite
+plans/           spec-driven plans per layer
+data/            store.json, questions.jsonl, facts.json
+DECISIONS.md     every non-trivial choice, alternatives, why
+LATENCY.md       latency budget with measured numbers
+REVIEW.md        code review findings and what was fixed
+PART2.md         platform architecture (Part 2)
+
+
+## Tests
+
+```bash
+make eval
+```
+
+34 behaviour-based scenarios: the criterion is expected behaviour (right
+number, right refusal, no stock leaking between variants), not exact text,
+so they survive rewording. Every bug found in review became a case.
