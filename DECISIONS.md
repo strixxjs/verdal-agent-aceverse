@@ -37,8 +37,9 @@ not as a replacement for it.
 ## 2. Role of the LLM: responder or compiler
 
 **Chosen:** the LLM runs offline, before the measured run. It generates
-`data/aliases.json` — Ukrainian names and synonyms for every product.
-The file is committed to the repository.
+`data/facts.json` — Ukrainian names and synonyms for every product, plus the
+structured policy numbers the handlers need. The file is committed to the
+repository.
 
 **Alternatives:** LLM on the hot path of every question; a hand-written
 alias dictionary.
@@ -60,8 +61,10 @@ why the tail must be functional rather than decorative.
 ## 3. Guaranteeing p95: measurement or construction
 
 **Chosen:** a hard deadline on every path. The deterministic path performs no
-network calls at all. The tail uses an `httpx` timeout of 350 ms, after which
-a safe deterministic answer is returned.
+network calls at all. The tail enforces a 350 ms **wall-clock** deadline via a
+worker thread + future timeout (an `httpx` timeout alone caps each phase
+separately and does not bound total time), after which a safe deterministic
+answer is returned.
 
 **Alternatives:** rely on the provider's average latency fitting the budget.
 
@@ -77,9 +80,7 @@ path starts to define p95 instead of the 3 ms main path.
 
 ## 4. LLM provider
 
-**Chosen:** Groq, `openai/gpt-oss-120b`, free tier. (Originally
-`llama-3.3-70b-versatile`; Groq deprecated it for free tier on 2026-06-17,
-migrated to gpt-oss-120b, which is also faster.)
+**Chosen:** Groq, `openai/gpt-oss-120b`, free tier.
 
 **Alternatives:** Google AI Studio (1500 requests/day vs 1000, 1M tokens/min
 vs 12K), OpenAI or Anthropic (paid), a local model via Ollama.

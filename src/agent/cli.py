@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -30,12 +31,24 @@ from agent.resolve import AliasIndex, resolve
 from agent.router import route
 from agent.store import Store
 
+logger = logging.getLogger(__name__)
+
 _ORDER_INTENTS = {"ORDER_STATUS", "ORDER_TRACKING", "ORDER_ITEMS", "ORDER_ADDRESS"}
 _PRODUCT_INTENTS = {"PRODUCT_PRICE", "PRODUCT_STOCK"}
 _POLICY_INTENTS = {
     "POLICY_RETURNS", "POLICY_EXCHANGE", "POLICY_SHIPPING",
     "POLICY_PAYMENT", "POLICY_DAMAGED",
 }
+
+# Every policy/compute number the handlers rely on. Validated at startup so
+# a broken facts.json regeneration is visible immediately, not as silently
+# degraded answers mid-run.
+_REQUIRED_POLICY_FACTS = (
+    "standard_shipping_cost", "express_shipping_cost",
+    "free_shipping_threshold", "standard_delivery_days",
+    "express_delivery_days", "return_window_days", "refund_business_days",
+    "damage_report_hours", "ships_outside_eu", "cash_on_delivery",
+)
 
 _REFUSE_TEXT = (
     "На жаль, я не можу надати знижку чи змінити ціну — "
@@ -45,6 +58,11 @@ _REFUSE_TEXT = (
 _NO_DATA_TEXT = (
     "На жаль, таких даних у мене немає. "
     "Уточніть, будь ласка, у підтримці магазину."
+)
+
+_ERROR_TEXT = (
+    "Вибачте, сталася технічна помилка під час обробки питання. "
+    "Спробуйте, будь ласка, переформулювати."
 )
 
 
@@ -59,7 +77,26 @@ class Agent:
         )
         self.store_path = str(store_path)
 
-    def answer(self, question: str) -> Answer:
+        policy_facts = self.facts.get("policy_facts", {})
+        missing = [k for k in _REQUIRED_POLICY_FACTS
+                   if policy_facts.get(k) is None]
+        if missing:
+            logger.warning(
+                "facts.json is missing policy facts %s — affected policy/"
+                "compute answers will degrade to the tail", missing,
+            )
+
+    def _tail(self, question: str, allow_tail: bool) -> Answer:
+        """The LLM tail, or its deterministic stand-in on the warm pass.
+
+        The warm pass must not spend Groq quota (30 RPM / 8000 TPM) that the
+        measured pass needs — it warms imports/indexes/caches only."""
+        if not allow_tail:
+            return Answer(text=h_fallback.SAFE_TEXT,
+                          branch="fallback_skipped", confident=False)
+        return h_fallback.handle(question, self.store_path)
+
+    def answer(self, question: str, allow_tail: bool = True) -> Answer:
         query = normalize(question)
         resolution = resolve(query, self.store, self.index)
         r = route(query, resolution)
@@ -67,7 +104,7 @@ class Agent:
 
         # Router not confident -> tail. (PRODUCT_COMPARE, UNKNOWN.)
         if not r.confident:
-            return h_fallback.handle(question, self.store_path)
+            return self._tail(question, allow_tail)
 
         if intent in _ORDER_INTENTS:
             return h_order.handle(intent, query, resolution, self.store)
@@ -76,17 +113,22 @@ class Agent:
             ans = h_product.handle(intent, query, resolution, self.store)
             # Product intent but nothing resolved -> tail rather than a shrug.
             if not ans.confident:
-                return h_fallback.handle(question, self.store_path)
+                return self._tail(question, allow_tail)
             return ans
 
         if intent in _POLICY_INTENTS:
-            return h_policy.handle(intent, query, resolution, self.store, self.facts)
+            ans = h_policy.handle(intent, query, resolution, self.store,
+                                  self.facts)
+            # A missing policy fact degrades to the tail, which has the raw
+            # policy text in its prompt.
+            if not ans.confident:
+                return self._tail(question, allow_tail)
+            return ans
 
         if intent == "COMPUTE_TOTAL":
-            ans = h_compute.handle(query, resolution, self.store, self.facts,
-                                   self.index)
+            ans = h_compute.handle(query, resolution, self.store, self.facts)
             if not ans.confident:
-                return h_fallback.handle(question, self.store_path)
+                return self._tail(question, allow_tail)
             return ans
 
         if intent == "REFUSE":
@@ -96,16 +138,47 @@ class Agent:
             return Answer(text=_NO_DATA_TEXT, branch="no_data", confident=True)
 
         # Fell through everything -> tail.
-        return h_fallback.handle(question, self.store_path)
+        return self._tail(question, allow_tail)
 
 
 def _read_questions(path: str | Path) -> list[dict[str, Any]]:
+    """Read the JSONL input. A malformed line is skipped with a warning —
+    one broken line must not kill the whole run before any answers."""
     items = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for lineno, line in enumerate(
+        Path(path).read_text(encoding="utf-8").splitlines(), start=1
+    ):
         line = line.strip()
-        if line:
-            items.append(json.loads(line))
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            logger.warning("skipping malformed JSON on line %d of %s",
+                           lineno, path)
+            continue
+        if not isinstance(row, dict):
+            logger.warning("skipping non-object JSON on line %d of %s",
+                           lineno, path)
+            continue
+        items.append(row)
     return items
+
+
+def _answer_safely(agent: Agent, item: dict[str, Any], allow_tail: bool) -> Answer:
+    """Per-question isolation: one bad question (or a bug it triggers) must
+    cost one safe answer, never the whole run. Caught, logged, degraded —
+    per the hot-path convention."""
+    q = item.get("q")
+    if not isinstance(q, str) or not q.strip():
+        logger.warning("malformed question line (id=%r): no usable 'q'",
+                       item.get("id"))
+        return Answer(text=_ERROR_TEXT, branch="input_error", confident=False)
+    try:
+        return agent.answer(q, allow_tail=allow_tail)
+    except Exception:
+        logger.exception("unhandled error answering id=%r", item.get("id"))
+        return Answer(text=_ERROR_TEXT, branch="error", confident=False)
 
 
 def _run_pass(agent: Agent, questions: list[dict[str, Any]],
@@ -113,17 +186,23 @@ def _run_pass(agent: Agent, questions: list[dict[str, Any]],
     results = []
     branch_times: dict[str, list[float]] = {}
     for item in questions:
-        qid, q = item["id"], item["q"]
         start = time.perf_counter()
-        ans = agent.answer(q)
+        # The warm pass must not spend LLM quota; only the measured pass may.
+        ans = _answer_safely(agent, item, allow_tail=measure)
         ms = (time.perf_counter() - start) * 1000
         if measure:
             branch_times.setdefault(ans.branch, []).append(ms)
-        results.append({"id": qid, "answer": ans.text, "ms": round(ms)})
+        results.append({"id": item.get("id"), "answer": ans.text, "ms": round(ms)})
     return results, branch_times
 
 
 def main() -> int:
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
     parser = argparse.ArgumentParser(description="Verdal store agent")
     parser.add_argument("--in", dest="in_path", default="data/questions.jsonl")
     parser.add_argument("--out", dest="out_path", default="results.jsonl")

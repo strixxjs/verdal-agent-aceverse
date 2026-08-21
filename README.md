@@ -35,9 +35,12 @@ No API key is required to run. See "The LLM tail" below.
 
 ## The constraint
 
-p95 <= 500 ms, from the input string to the complete answer. Measured p95 is
-**208 ms** on the 39 sample questions — see `LATENCY.md` for the per-branch
-numbers and why different questions take different paths.
+p95 <= 500 ms, from the input string to the complete answer. Measured p95 on
+the 39 sample questions is **<1 ms** without an API key (the tail degrades
+instantly) and is bounded by the tail's **350 ms wall-clock deadline** when a
+key is present — see `LATENCY.md` for the per-branch numbers and why
+different questions take different paths. Percentiles are computed with the
+standard nearest-rank method.
 
 ## How it works
 
@@ -56,7 +59,8 @@ A question flows through one path, chosen by confidence:
 5. **tail** — only if the router is not confident: one LLM call with a hard
    deadline, degrading to a safe answer if it cannot deliver in time.
 
-36 of 39 questions never leave the deterministic path and answer in ~1 ms.
+37 of 39 questions never leave the deterministic path and answer in well
+under a millisecond.
 
 ## Why not RAG
 
@@ -74,10 +78,12 @@ generate `data/facts.json` (Ukrainian product aliases + policy numbers), which
 is committed. The hot path reads that file and needs no key.
 
 At runtime the tail is a fallback for unclassified questions only. Measured
-LLM latency is ~1000 ms — over the whole budget — so the tail is deadline-
-capped at 350 ms and degrades to a safe answer rather than completing inside
-the hot path. A missing or rate-limited key never breaks a run; those
-questions return a safe response marked `fallback_degraded`.
+LLM latency is ~1000 ms — over the whole budget — so the tail is capped at a
+350 ms **wall-clock** deadline (worker thread + future timeout; an httpx
+timeout alone bounds each connection phase, not the total) and degrades to a
+safe answer rather than completing inside the hot path. A missing or
+rate-limited key never breaks a run; those questions return a safe response
+marked `fallback_degraded`, and every degradation reason is logged to stderr.
 
 To enable the tail, copy `.env.example` to `.env` and set `GROQ_API_KEY`.
 To regenerate aliases after changing `store.json`: `make build`.

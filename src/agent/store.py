@@ -144,6 +144,20 @@ class Product:
     def find(self, size: str | None = None, colour: str | None = None) -> list[Variant]:
         return [v for v in self.variants if v.matches(size, colour)]
 
+    def size_axis_matches(self, wanted: str) -> bool:
+        """Whether this product's size axis could ever express `wanted`.
+
+        A numeric "35" against a one-size backpack is a token from the
+        product name ("Hiking Backpack 35L"), not a size request — callers
+        drop the size instead of reporting a false "not available".
+        """
+        _, kind, _ = normalize_size(wanted)
+        if kind == "letter":
+            return any(v.size_kind == "letter" for v in self.variants)
+        if kind in ("numeric", "range"):
+            return any(v.size_kind in ("numeric", "range") for v in self.variants)
+        return True
+
     @property
     def colours(self) -> list[str]:
         seen: dict[str, None] = {}

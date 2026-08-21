@@ -38,7 +38,13 @@ def handle_stock(query: NormalizedQuery, product: Product,
        and (helpfully) whether the product exists in other variants.
     3. No size/colour asked -> report the product's overall availability.
     """
-    asked_specific = query.size is not None or query.colour is not None
+    # Drop a "size" the product cannot have on any variant — it is a token
+    # from the product name ("Hiking Backpack 35L" -> "35"/"L"), not a
+    # variant request. Mirrors the same guard in resolve.resolve().
+    size = query.size
+    if size is not None and not product.size_axis_matches(size):
+        size = None
+    asked_specific = size is not None or query.colour is not None
 
     # Case 1: a concrete variant resolved.
     if resolution.variant is not None:
@@ -58,7 +64,7 @@ def handle_stock(query: NormalizedQuery, product: Product,
 
     # Case 2: a specific size/colour was asked but nothing matched.
     if asked_specific:
-        matches = product.find(query.size, query.colour)
+        matches = product.find(size, query.colour)
         if not matches:
             return Answer(
                 text=(

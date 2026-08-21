@@ -32,8 +32,8 @@ Verification: "светра", "светрі", "светр" collapse to the same 
 ### resolve.py
 Input: `NormalizedQuery`.
 Output: `Resolution(product|None, variant|None, order|None, score: float)`.
-Order of attempts: exact match against `aliases.json` -> fuzzy match
-(rapidfuzz) above threshold -> None.
+Order of attempts: exact match against the aliases in `facts.json` -> fuzzy
+match (rapidfuzz) above threshold -> None.
 
 Verification: no resolution below threshold ever returns a product.
 Returning None is strictly better than returning the wrong product.
@@ -56,7 +56,9 @@ No network access. No access to the LLM.
 
 ### fallback.py
 Input: raw question + serialized `store.json`.
-Deadline: 350 ms via `httpx.Timeout`. Any error, 429 or timeout returns
+Deadline: 350 ms wall-clock, enforced by a worker thread + future timeout
+(`httpx.Timeout` alone caps each phase separately and does not bound total
+time). Any error, 429 or deadline miss returns
 `Answer(text=<safe refusal>, branch="fallback_degraded", confident=False)`.
 
 Verification: a run with a deliberately broken key completes and stays
@@ -71,7 +73,7 @@ Each layer is verified by an actual run before the next one starts.
    print everything that fails to resolve
 3. router.py -> intent distribution over the 39 questions, print UNKNOWN
 4. handlers -> answers
-5. build_aliases.py -> offline generation, commit aliases.json
+5. build_facts.py -> offline generation, commit facts.json
 6. fallback.py -> tail
 7. timing.py + cli.py -> results.jsonl, percentiles
 8. eval/ -> scenarios

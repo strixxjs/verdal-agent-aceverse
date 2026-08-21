@@ -26,8 +26,9 @@ Three tiers. Each question takes exactly one of them.
    One Groq call with the whole `store.json` in the prompt. Hard deadline.
    Timeout, 429 or missing key -> deterministic safe answer.
 
-The LLM also runs **offline** (`make build`) to generate `data/aliases.json`.
-That file is committed. `make run` never regenerates it.
+The LLM also runs **offline** (`make build`, module `agent.build_facts`) to
+generate `data/facts.json` (Ukrainian product aliases + extracted policy
+numbers). That file is committed. `make run` never regenerates it.
 
 ## Stack
 
@@ -42,7 +43,7 @@ src/agent/router.py          - intent classification
 src/agent/handlers/          - order, product, policy, compute
 src/agent/fallback.py        - LLM tail with deadline
 src/agent/timing.py          - measurement and percentiles
-src/agent/build_aliases.py   - offline phase
+src/agent/build_facts.py     - offline phase (aliases + policy facts)
 
 ## Conventions
 
@@ -59,4 +60,5 @@ src/agent/build_aliases.py   - offline phase
 
 - Do not hardcode answers, question ids or aliases for the 39 sample questions.
   The evaluator will supply a larger file with different phrasing.
-- Do not add a vector store,
+- Do not add a vector store, a web framework or an HTTP layer — rejected
+  deliberately, see DECISIONS.md 1 and 6.

@@ -28,12 +28,29 @@ QUANTITY_DISQUALIFIER_TOKENS = frozenset({"л"})
 
 # Homoglyph guard: a customer (especially via voice-to-text) may type a
 # Cyrillic look-alike instead of the Latin letter store.json actually uses
-# for size codes (S/M/L/XL). Scoped to short tokens that would then exactly
-# match a known size code, so it never touches ordinary Cyrillic words.
+# for size codes. Scoped to short tokens that would then exactly match a
+# known size code, so it never touches ordinary Cyrillic words. Note this
+# only rescues letters that LOOK alike (М -> M); sizes typed by
+# transliteration (ХЛ meaning XL) are handled by CYRILLIC_SIZE_CODES below.
 _CYRILLIC_LATIN_CONFUSABLES = {
     "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M",
     "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
 }
+
+# Size codes typed in pure Cyrillic by transliteration, not homoglyph:
+# "розмір ХЛ" means XL, "розмір С" means S. Checked as whole tokens only,
+# and never for a token that directly follows a digit — "35 л" is litres
+# and "2 м" is metres, not sizes (see _extract_size).
+CYRILLIC_SIZE_CODES: dict[str, str] = {
+    "с": "S", "м": "M", "л": "L",
+    "хс": "XS", "хл": "XL", "ххл": "XXL",
+}
+
+# Month/year context: a 4-digit token next to these is a date, not an order
+# number ("замовлення від 12 серпня 2026" must not become order #2026).
+MONTH_ROOTS = ("січ", "лют", "берез", "квіт", "трав", "черв",
+               "лип", "серп", "верес", "жовт", "листоп", "груд")
+YEAR_WORD_ROOTS = ("рок", "рік")
 
 # Closed, small colour vocabulary matching store.json's variant colours.
 # Same spirit as store.py's LETTER_SIZES/ONE_SIZE_TOKENS tables — a fixed
@@ -113,6 +130,18 @@ def _confusable_translate(token: str) -> str:
     return "".join(_CYRILLIC_LATIN_CONFUSABLES.get(ch, ch) for ch in token.upper())
 
 
+def _looks_like_year(token: str) -> bool:
+    return len(token) == 4 and token.isdigit() and 1900 <= int(token) <= 2099
+
+
+def _has_date_context(raw_tokens: list[str]) -> bool:
+    return any(
+        token.startswith(root)
+        for token in raw_tokens
+        for root in MONTH_ROOTS + YEAR_WORD_ROOTS
+    )
+
+
 def _extract_order_number(text: str, raw_tokens: list[str]) -> tuple[str | None, str | None]:
     hash_match = _HASH_ORDER_RE.search(text)
     if hash_match:
@@ -123,15 +152,29 @@ def _extract_order_number(text: str, raw_tokens: list[str]) -> tuple[str | None,
         token.startswith(root) for token in raw_tokens for root in ORDER_KEYWORD_ROOTS
     )
     if has_keyword:
+        date_context = _has_date_context(raw_tokens)
         for token in raw_tokens:
-            if token.isdigit() and len(token) >= 4:
+            # 4-8 digits: realistic order-number lengths. Longer digit runs
+            # are phone or card numbers ("оплата карткою 1234... за
+            # замовлення") and must not become an order lookup.
+            if token.isdigit() and 4 <= len(token) <= 8:
+                # "замовлення від 12 серпня 2026" — the year is a date,
+                # not an order number.
+                if date_context and _looks_like_year(token):
+                    continue
                 return normalize_order_number(token), token
 
     return None, None
 
 
 def _extract_size(raw_tokens: list[str], consumed_order_digits: str | None) -> str | None:
-    for token in raw_tokens:
+    for idx, token in enumerate(raw_tokens):
+        # A short letter token right after a digit is a unit suffix, not a
+        # size: "35l"/"35 л" is litres, "1l" is one litre, "2 м" is metres.
+        if len(token) <= 3 and idx > 0 and raw_tokens[idx - 1].isdigit():
+            continue
+        if token in CYRILLIC_SIZE_CODES:
+            return CYRILLIC_SIZE_CODES[token]
         candidate = _confusable_translate(token) if len(token) <= 3 else token
         canonical, kind, _ = normalize_size(candidate)
         if kind in ("letter", "range", "one"):
@@ -167,8 +210,15 @@ def _extract_size(raw_tokens: list[str], consumed_order_digits: str | None) -> s
     return None
 
 
+# Words that share a colour root's prefix but are not colours: "синтетичний"
+# starts with "син" yet does not mean navy.
+COLOUR_EXCLUDE_PREFIXES = ("синт",)
+
+
 def _extract_colour(raw_tokens: list[str]) -> str | None:
     for token in raw_tokens:
+        if any(token.startswith(prefix) for prefix in COLOUR_EXCLUDE_PREFIXES):
+            continue
         for root, colour in COLOUR_ROOTS.items():
             if token.startswith(root):
                 return colour

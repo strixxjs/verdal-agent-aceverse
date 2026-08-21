@@ -47,31 +47,46 @@ class Route:
 # word if shorter) after being truncated the same way, so a root like
 # "пошкодж" correctly matches a token stemmed from "пошкоджена" regardless
 # of which string is longer.
-TRACKING_ROOTS = ("трек", "track")
-ADDRESS_ROOTS = ("адрес", "куди")
-ITEMS_ROOTS = ("вход",)
+TRACKING_ROOTS = ("трек", "track", "відсте", "накладн")
+ADDRESS_ROOTS = ("адрес", "куди", "країн", "місто", "місті")
+ITEMS_ROOTS = ("вход", "товар", "позиц", "містит", "перелі", "всеред", "списо")
 
 DAMAGE_ROOTS = ("плям", "брак", "дефект", "розірв", "пошкодж", "зламан")
-RETURN_ROOTS = ("поверн", "відмов")
+# "зворот" covers "зворотна пересилка / зворотна доставка" — who pays for
+# the return leg is answered verbatim by the returns policy.
+RETURN_ROOTS = ("поверн", "відмов", "зворот")
 EXCHANGE_ROOTS = ("обмін", "поміня", "підійд")
 SHIPPING_ROOTS = ("достав", "відправ", "британ", "кордон", "експрес")
 PAYMENT_ROOTS = ("оплат", "картк", "наложен", "платіж", "спишуть")
 
 DISCOUNT_ROOTS = ("знижк", "скидк")
 FREE_ROOTS = ("безко",)
-GIVE_ROOTS = ("дай",)
+# Personal-request markers: a discount *demand* is refused, a discount
+# *question* is answered as "no such data" (store.json has no discounts).
+GIVE_ROOTS = ("дай", "надай", "зроби", "хочу", "прошу", "можна", "можеш")
 
 RESTOCK_ROOTS = ("завез",)
 
-PRICE_ROOTS = ("ціна", "кошт", "почім", "скіль")
+# "цін" (not "ціна") so oblique forms match: ціну, ціни, ціною.
+PRICE_ROOTS = ("цін", "кошт", "почім", "скіль", "варт")
 
-COMPARE_ROOTS = ("дешевш", "кращ", "порівн")
-CONJUNCTION_TOKENS = ("чи", "або")
+COMPARE_ROOTS = ("дешевш", "дорожч", "кращ", "порівн")
+CONJUNCTION_TOKENS = ("чи", "або", "і", "та")
 
 TOGETHER_ROOTS = ("разом",)
 
+# "скільки йде доставка" asks for delivery TIME, not cost — routed to the
+# shipping policy even when a product is named, unless an explicit cost
+# word is present.
+DURATION_ROOTS = ("йде", "йти", "днів", "дні", "довго", "трива", "швидк")
+COST_ROOTS = ("кошт", "варт", "цін", "почім", "євро", "eur")
+
 SIZE_ROOT = "розмір"
 NEGATION_TOKENS = ("не",)
+# "не той/такий розмір" — the demonstrative must directly follow the
+# negation, otherwise polite phrasing ("не підкажете, чи є 43 розмір")
+# would be misread as a wrong-size complaint.
+WRONG_SIZE_DEMONSTRATIVES = frozenset({"той", "та", "те", "ті", "ту", "мій"})
 
 
 def _has_root(tokens: tuple[str, ...], roots: tuple[str, ...]) -> bool:
@@ -85,17 +100,32 @@ def _has_exact(tokens: tuple[str, ...], words: tuple[str, ...]) -> bool:
 
 
 def _wrong_size_phrase(tokens: tuple[str, ...]) -> bool:
-    """'не той розмір' style phrasing: negation plus the size word."""
-    return _has_exact(tokens, NEGATION_TOKENS) and _has_root(tokens, (SIZE_ROOT,))
+    """'не той розмір' style phrasing: negation + demonstrative + size word.
+
+    The demonstrative must be adjacent to the negation ("не той", "не такий"),
+    otherwise a polite "Не підкажете, чи є 43 розмір?" would be misrouted.
+    """
+    if not _has_root(tokens, (SIZE_ROOT,)):
+        return False
+    for i, token in enumerate(tokens[:-1]):
+        if token in NEGATION_TOKENS:
+            nxt = tokens[i + 1]
+            if nxt in WRONG_SIZE_DEMONSTRATIVES or nxt.startswith("так"):
+                return True
+    return False
 
 
 def _is_refuse(tokens: tuple[str, ...]) -> bool:
-    if _has_root(tokens, DISCOUNT_ROOTS):
+    # A discount is refused only when it is asked FOR ("дай знижку");
+    # a question ABOUT discounts routes to NO_DATA instead (see route()).
+    if _has_root(tokens, DISCOUNT_ROOTS) and _has_root(tokens, GIVE_ROOTS):
         return True
     return _has_root(tokens, FREE_ROOTS) and _has_root(tokens, GIVE_ROOTS)
 
 
 def _is_compare(tokens: tuple[str, ...]) -> bool:
+    if _has_root(tokens, ("порівн",)):
+        return True
     return _has_root(tokens, COMPARE_ROOTS) and _has_exact(tokens, CONJUNCTION_TOKENS)
 
 
@@ -137,20 +167,34 @@ def route(query: NormalizedQuery, resolution: Resolution) -> Route:
     if _has_root(tokens, DAMAGE_ROOTS):
         return Route(Intent.POLICY_DAMAGED, True)
 
-    # 3. REFUSE — hard override, independent of resolution.
+    # 3. REFUSE — hard override, independent of resolution. A question
+    #    ABOUT discounts (rather than a demand for one) is honest NO_DATA:
+    #    store.json carries no discount information.
     if _is_refuse(tokens):
         return Route(Intent.REFUSE, True)
+    if _has_root(tokens, DISCOUNT_ROOTS):
+        return Route(Intent.NO_DATA, True)
 
     # 4. PRODUCT_COMPARE — Resolution only ever carries one product, so this
     #    is flagged rather than answered.
     if _is_compare(tokens):
         return Route(Intent.PRODUCT_COMPARE, False)
 
-    # 5. COMPUTE_TOTAL
+    # 5. Shipping duration ("скільки йде доставка светра?") is a policy
+    #    question even when a product is named — delivery time does not
+    #    depend on the product. Explicit cost words override this.
+    if (
+        _has_root(tokens, SHIPPING_ROOTS)
+        and _has_root(tokens, DURATION_ROOTS)
+        and not _has_root(tokens, COST_ROOTS)
+    ):
+        return Route(Intent.POLICY_SHIPPING, True)
+
+    # 6. COMPUTE_TOTAL
     if _is_compute(query, resolution):
         return Route(Intent.COMPUTE_TOTAL, True)
 
-    # 6. POLICY (independent of product resolution)
+    # 7. POLICY (independent of product resolution)
     if _has_root(tokens, RETURN_ROOTS):
         return Route(Intent.POLICY_RETURNS, True)
     if _has_root(tokens, EXCHANGE_ROOTS) or _wrong_size_phrase(tokens):
@@ -160,11 +204,11 @@ def route(query: NormalizedQuery, resolution: Resolution) -> Route:
     if _has_root(tokens, PAYMENT_ROOTS):
         return Route(Intent.POLICY_PAYMENT, True)
 
-    # 7. NO_DATA — store.json never has restock dates, under any phrasing.
+    # 8. NO_DATA — store.json never has restock dates, under any phrasing.
     if _has_root(tokens, RESTOCK_ROOTS):
         return Route(Intent.NO_DATA, True)
 
-    # 8. PRODUCT — stock is the default: explicit STOCK_ROOTS/"є" or no
+    # 9. PRODUCT — stock is the default: explicit STOCK_ROOTS/"є" or no
     #    clear signal at all both land here, matching the spec's rule that
     #    an unmarked product question defaults to stock.
     if resolution.product is not None:
@@ -172,7 +216,7 @@ def route(query: NormalizedQuery, resolution: Resolution) -> Route:
             return Route(Intent.PRODUCT_PRICE, True)
         return Route(Intent.PRODUCT_STOCK, True)
 
-    # 9. UNKNOWN — nothing matched, let the LLM tail handle it.
+    # 10. UNKNOWN — nothing matched, let the LLM tail handle it.
     return Route(Intent.UNKNOWN, False)
 
 

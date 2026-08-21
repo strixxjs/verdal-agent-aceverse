@@ -10,8 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 from agent.handlers import Answer
-from agent.normalize import NormalizedQuery
-from agent.resolve import AliasIndex, Resolution, resolve
+from agent.normalize import STEM_PREFIX_LEN, NormalizedQuery
+from agent.resolve import Resolution
 from agent.store import Product, Store
 
 
@@ -42,38 +42,55 @@ def _size_as_int(query: NormalizedQuery) -> int | None:
     return None
 
 
-def _shipping_signal(query: NormalizedQuery) -> str | None:
-    """Which shipping tier the question refers to, if any.
+def _root(word: str) -> str:
+    """Truncate a root the same way normalize._stem truncates tokens.
 
-    Roots are truncated to STEM_PREFIX_LEN (5) to match normalize.py stemming:
-    'доставка' stems to 'доста', so the root must be 'доста', not 'достав'.
-    """
+    query.tokens are stemmed to STEM_PREFIX_LEN characters, so a root longer
+    than that ("доставка") can never match via startswith — it must be cut
+    to the same length first. Same rule as router._has_root."""
+    return word[:STEM_PREFIX_LEN]
+
+
+def _shipping_signal(query: NormalizedQuery) -> str | None:
+    """Which shipping tier the question refers to, if any."""
     tokens = query.tokens
-    if any(t.startswith("експр") for t in tokens):
+    if any(t.startswith(_root("експрес")) for t in tokens):
         return "express"
-    if any(t.startswith("доста") or t.startswith("станд") for t in tokens):
+    if any(
+        t.startswith(_root("доставка")) or t.startswith(_root("стандартна"))
+        for t in tokens
+    ):
         return "standard"
     return None
 
 
+def _incomplete() -> Answer:
+    return Answer(
+        text="Уточніть, будь ласка, товар і тип доставки для розрахунку.",
+        branch="compute_incomplete",
+        confident=False,
+    )
+
+
 def handle(query: NormalizedQuery, resolution: Resolution, store: Store,
-           facts: dict[str, Any], index: AliasIndex) -> Answer:
+           facts: dict[str, Any]) -> Answer:
+    # No silent numeric defaults: a missing policy fact must degrade to the
+    # tail, not compute with 0 (threshold 0 would make EVERY order "free
+    # shipping").
     pf = facts.get("policy_facts", {})
-    std = pf.get("standard_shipping_cost", 0)
-    exp = pf.get("express_shipping_cost", 0)
-    threshold = pf.get("free_shipping_threshold", 0)
+    std = pf.get("standard_shipping_cost")
+    exp = pf.get("express_shipping_cost")
+    threshold = pf.get("free_shipping_threshold")
 
-    # The router may hand us product=None (e.g. q037). Try to resolve now.
     product = resolution.product
-    if product is None:
-        product = resolve(query, store, index).product
-
     qty = _quantity(query)
     tier = _shipping_signal(query)
 
     # --- free-shipping-threshold question (q020, q031) ---
     wants_free = any(t.startswith("безко") for t in query.tokens)
     if wants_free:
+        if threshold is None:
+            return _incomplete()
         if product is not None:
             goods = _price(product) * qty
             if goods >= threshold:
@@ -106,6 +123,8 @@ def handle(query: NormalizedQuery, resolution: Resolution, store: Store,
     if product is not None and tier is not None:
         goods = _price(product) * qty
         ship = exp if tier == "express" else std
+        if ship is None or threshold is None:
+            return _incomplete()
         ship_word = "експрес" if tier == "express" else "стандартна"
         # store policy: free over threshold
         if goods >= threshold:
@@ -129,9 +148,18 @@ def handle(query: NormalizedQuery, resolution: Resolution, store: Store,
             confident=True,
         )
 
+    # --- goods-only line total ("скільки разом за два светри") ---
+    # Only with an explicit quantity: a qty of 1 here usually means the
+    # question names several products ("светр і шапка разом") and the
+    # resolver carries just one — that belongs to the tail, not a confident
+    # single-product answer.
+    if product is not None and qty > 1:
+        goods = _price(product) * qty
+        return Answer(
+            text=f"{qty}×{product.title} = {_fmt(goods)} EUR.",
+            branch="compute_line_total",
+            confident=True,
+        )
+
     # --- couldn't assemble the arithmetic confidently ---
-    return Answer(
-        text="Уточніть, будь ласка, товар і тип доставки для розрахунку.",
-        branch="compute_incomplete",
-        confident=False,
-    )
+    return _incomplete()

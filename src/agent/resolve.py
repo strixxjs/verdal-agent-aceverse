@@ -50,6 +50,8 @@ class Resolution:
 class AliasIndex:
     exact: dict[str, str]                        # lowered phrase -> product_id
     fuzzy_corpus: tuple[tuple[str, str], ...]     # (product_id, cleaned token string)
+    exact_pattern: re.Pattern                     # one alternation over all phrases
+    fuzzy_candidates: tuple[str, ...]             # corpus strings, prebuilt once
 
     @classmethod
     def load(cls, store: Store, facts_path: str | Path = "data/facts.json") -> "AliasIndex":
@@ -80,7 +82,24 @@ class AliasIndex:
                 if len(cleaned) >= 2:
                     fuzzy_corpus.append((product_id, " ".join(cleaned)))
 
-        return cls(exact=exact, fuzzy_corpus=tuple(fuzzy_corpus))
+        # Precompile the exact-match scan into one alternation, built once at
+        # startup: the hot path must not loop over ~300 phrases per question
+        # (see the "no linear scans on the hot path" convention). Longest
+        # phrases first so at equal start positions the longest wins.
+        if exact:
+            alternation = "|".join(
+                re.escape(p) for p in sorted(exact, key=len, reverse=True)
+            )
+            exact_pattern = re.compile(rf"\b(?:{alternation})\b")
+        else:
+            exact_pattern = re.compile(r"(?!x)x")  # matches nothing
+
+        return cls(
+            exact=exact,
+            fuzzy_corpus=tuple(fuzzy_corpus),
+            exact_pattern=exact_pattern,
+            fuzzy_candidates=tuple(c for _, c in fuzzy_corpus),
+        )
 
 
 def _is_noise_token(token: str) -> bool:
@@ -106,15 +125,17 @@ def _clean_tokens(tokens: tuple[str, ...]) -> list[str]:
 
 
 def _exact_match(query: NormalizedQuery, index: AliasIndex) -> str | None:
-    """Longest alias phrase that appears as a whole word/phrase in query.text."""
+    """Longest alias phrase that appears as a whole word/phrase in query.text.
+
+    One pass with the precompiled alternation built at startup; picks the
+    longest match across all positions to keep the old semantics.
+    """
     best_phrase: str | None = None
-    best_product_id: str | None = None
-    for phrase, product_id in index.exact.items():
-        if re.search(rf"\b{re.escape(phrase)}\b", query.text):
-            if best_phrase is None or len(phrase) > len(best_phrase):
-                best_phrase = phrase
-                best_product_id = product_id
-    return best_product_id
+    for match in index.exact_pattern.finditer(query.text):
+        phrase = match.group(0)
+        if best_phrase is None or len(phrase) > len(best_phrase):
+            best_phrase = phrase
+    return index.exact[best_phrase] if best_phrase is not None else None
 
 
 def _fuzzy_match(query: NormalizedQuery, index: AliasIndex) -> tuple[str | None, float]:
@@ -130,8 +151,9 @@ def _fuzzy_match(query: NormalizedQuery, index: AliasIndex) -> tuple[str | None,
         return None, 0.0
 
     query_str = " ".join(query_tokens)
-    candidates = [candidate for _, candidate in index.fuzzy_corpus]
-    match = process.extractOne(query_str, candidates, scorer=fuzz.token_set_ratio)
+    match = process.extractOne(
+        query_str, index.fuzzy_candidates, scorer=fuzz.token_set_ratio
+    )
     if match is None:
         return None, 0.0
 
@@ -167,8 +189,13 @@ def resolve(query: NormalizedQuery, store: Store, index: AliasIndex) -> Resoluti
         return Resolution(product=None, variant=None, order=None, score=score)
 
     variant: Variant | None = None
-    if query.size is not None or query.colour is not None:
-        matches = product.find(query.size, query.colour)
+    size = query.size
+    if size is not None and not product.size_axis_matches(size):
+        # "35" extracted from "Hiking Backpack 35L" is part of the name,
+        # not a size this product has — drop it rather than mismatch.
+        size = None
+    if size is not None or query.colour is not None:
+        matches = product.find(size, query.colour)
         if len(matches) == 1:
             variant = matches[0]
 

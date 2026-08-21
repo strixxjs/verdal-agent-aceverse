@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -16,11 +17,14 @@ class Percentiles:
 
 
 def _pct(sorted_ms: list[float], q: float) -> float:
-    """Nearest-rank percentile. sorted_ms must be ascending and non-empty."""
+    """Standard nearest-rank percentile: value at rank ceil(q/100 * n).
+
+    Deliberately not round((n-1)*q): rounding down would under-report the
+    very number (p95) the task's hard constraint is about."""
     if not sorted_ms:
         return 0.0
-    k = max(0, min(len(sorted_ms) - 1, round(q / 100 * (len(sorted_ms) - 1))))
-    return sorted_ms[k]
+    k = max(1, min(len(sorted_ms), math.ceil(q / 100 * len(sorted_ms))))
+    return sorted_ms[k - 1]
 
 
 def summarize(times_ms: list[float]) -> Percentiles:
